@@ -51,6 +51,15 @@ public:
     return false;
   }
 
+  template <typename FutureT>
+  bool spin_until_future_complete(
+    FutureT &future,
+    std::chrono::nanoseconds timeout = kDefaultTimeout)
+  {
+    auto result = executor_.spin_until_future_complete(future, timeout);
+    return result == rclcpp::FutureReturnCode::SUCCESS;
+  }
+
   void spin_some() { executor_.spin_some(); }
 
 private:
@@ -75,10 +84,13 @@ template <typename MsgT>
 class TestPublisher : public Connectable
 {
 public:
-  TestPublisher(rclcpp::Node::SharedPtr node, const std::string & topic) 
+  TestPublisher(
+    rclcpp::Node::SharedPtr node,
+    const std::string & topic,
+    const rclcpp::QoS & qos = rclcpp::QoS(rclcpp::KeepLast(10)))
     : topic_(topic)
   {
-    pub_ = node->create_publisher<MsgT>(topic, 10);
+    pub_ = node->create_publisher<MsgT>(topic, qos);
   }
 
   void publish(const MsgT & msg) { pub_->publish(msg); }
@@ -213,6 +225,91 @@ private:
   std::string action_name_;
 };
 
+/// Wrapper for Service Server
+template <typename ServiceT>
+class TestServiceServer : public Connectable
+{
+public:
+  using Callback = std::function<void(
+    const std::shared_ptr<typename ServiceT::Request>,
+    std::shared_ptr<typename ServiceT::Response>)>;
+
+  TestServiceServer(
+    const rclcpp::Node::SharedPtr &node,
+    const std::string &service_name,
+    const Callback &callback,
+    const rclcpp::QoS &qos = rclcpp::ServicesQoS())
+  : node_(node), service_name_(service_name)
+  {
+    service_ = node_->create_service<ServiceT>(service_name_, callback, qos);
+  }
+
+  bool is_connected() const override { return node_->count_clients(service_name_) > 0; }
+  std::string get_name() const override { return service_name_; }
+  std::string get_type() const override { return "Service Server"; }
+
+  bool wait_for_client(TestExecutor &exec, std::chrono::nanoseconds timeout = kDefaultTimeout)
+  {
+    return exec.spin_until([this]() { return is_connected(); }, timeout);
+  }
+
+  typename rclcpp::Service<ServiceT>::SharedPtr get() { return service_; }
+
+private:
+  rclcpp::Node::SharedPtr node_;
+  typename rclcpp::Service<ServiceT>::SharedPtr service_;
+  std::string service_name_;
+};
+
+/// Wrapper for Action Server
+template <typename ActionT>
+class TestActionServer : public Connectable
+{
+public:
+  using GoalHandle = rclcpp_action::ServerGoalHandle<ActionT>;
+  using GoalCallback = std::function<rclcpp_action::GoalResponse(
+    const rclcpp_action::GoalUUID &,
+    const std::shared_ptr<const typename ActionT::Goal>)>;
+  using CancelCallback = std::function<rclcpp_action::CancelResponse(
+    const std::shared_ptr<GoalHandle>)>;
+  using AcceptedCallback = std::function<void(const std::shared_ptr<GoalHandle>)>;
+
+  TestActionServer(
+    const rclcpp::Node::SharedPtr &node,
+    const std::string &action_name,
+    GoalCallback goal_cb,
+    CancelCallback cancel_cb,
+    AcceptedCallback accepted_cb)
+  : node_(node), action_name_(action_name)
+  {
+    server_ = rclcpp_action::create_server<ActionT>(
+      node_, action_name_, std::move(goal_cb), std::move(cancel_cb), std::move(accepted_cb));
+  }
+
+  bool is_connected() const override
+  {
+    // Clients subscribe to the status topic; use that to infer connectivity.
+    return node_->count_subscribers(status_topic()) > 0;
+  }
+
+  std::string get_name() const override { return action_name_; }
+  std::string get_type() const override { return "Action Server"; }
+
+  bool wait_for_client(TestExecutor &exec, std::chrono::nanoseconds timeout = kDefaultTimeout)
+  {
+    return exec.spin_until([this]() { return is_connected(); }, timeout);
+  }
+
+  typename rclcpp_action::Server<ActionT>::SharedPtr get() { return server_; }
+
+private:
+  std::string status_topic() const { return action_name_ + "/_action/status"; }
+
+  rclcpp::Node::SharedPtr node_;
+  typename rclcpp_action::Server<ActionT>::SharedPtr server_;
+  std::string action_name_;
+};
+
 
 // =============================================================================
 // The Main Testing Node
@@ -226,15 +323,22 @@ public:
 
   // Factory methods that register the objects
   template <typename MsgT>
-  std::shared_ptr<TestPublisher<MsgT>> create_test_publisher(const std::string & topic) {
-      auto ptr = std::make_shared<TestPublisher<MsgT>>(shared_from_this(), topic);
+  std::shared_ptr<TestPublisher<MsgT>> create_test_publisher(
+    const std::string & topic,
+    const rclcpp::QoS & qos = rclcpp::QoS(rclcpp::KeepLast(10)))
+  {
+      auto ptr = std::make_shared<TestPublisher<MsgT>>(shared_from_this(), topic, qos);
       register_connectable(ptr);
       return ptr;
   }
 
   template <typename MsgT>
-  std::shared_ptr<TestSubscription<MsgT>> create_test_subscription(const std::string & topic, bool latched=false) {
-      auto ptr = std::make_shared<TestSubscription<MsgT>>(shared_from_this(), topic, rclcpp::QoS(10), latched);
+  std::shared_ptr<TestSubscription<MsgT>> create_test_subscription(
+    const std::string & topic,
+    const rclcpp::QoS & qos = rclcpp::QoS(rclcpp::KeepLast(10)),
+    bool latched=false)
+  {
+      auto ptr = std::make_shared<TestSubscription<MsgT>>(shared_from_this(), topic, qos, latched);
       register_connectable(ptr);
       return ptr;
   }
@@ -249,6 +353,29 @@ public:
   template <typename ActionT>
   std::shared_ptr<TestActionClient<ActionT>> create_test_action_client(const std::string & action_name) {
       auto ptr = std::make_shared<TestActionClient<ActionT>>(shared_from_this(), action_name);
+      register_connectable(ptr);
+      return ptr;
+  }
+
+  template <typename ServiceT>
+  std::shared_ptr<TestServiceServer<ServiceT>> create_test_service_server(
+    const std::string & service_name,
+    typename TestServiceServer<ServiceT>::Callback callback,
+    const rclcpp::QoS &qos = rclcpp::ServicesQoS())
+  {
+      auto ptr = std::make_shared<TestServiceServer<ServiceT>>(shared_from_this(), service_name, callback, qos);
+      register_connectable(ptr);
+      return ptr;
+  }
+
+  template <typename ActionT>
+  std::shared_ptr<TestActionServer<ActionT>> create_test_action_server(
+    const std::string & action_name,
+    typename TestActionServer<ActionT>::GoalCallback goal_cb,
+    typename TestActionServer<ActionT>::CancelCallback cancel_cb,
+    typename TestActionServer<ActionT>::AcceptedCallback accepted_cb)
+  {
+      auto ptr = std::make_shared<TestActionServer<ActionT>>(shared_from_this(), action_name, goal_cb, cancel_cb, accepted_cb);
       register_connectable(ptr);
       return ptr;
   }
@@ -290,6 +417,229 @@ private:
 
   std::vector<std::shared_ptr<Connectable>> registry_;
 };
+
+
+// =============================================================================
+// Topic and Service/Action Helpers preserved for backward compatibility
+// =============================================================================
+
+/// Subscription wrapper that caches the last message and message count.
+template <class MsgT>
+class CachedSubscriber
+{
+public:
+  CachedSubscriber(
+    const rclcpp::Node::SharedPtr &node,
+    const std::string &topic,
+    const rclcpp::QoS &qos = rclcpp::QoS(rclcpp::KeepLast(10)),
+    bool latched = false)
+  {
+    rclcpp::QoS resolved_qos = qos;
+    if (latched) {
+      resolved_qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
+    }
+    sub_ = node->create_subscription<MsgT>(
+      topic,
+      resolved_qos,
+      [this](const std::shared_ptr<MsgT> msg) { on_message(msg); });
+  }
+
+  /// Clear cached data.
+  void reset()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_message_.reset();
+    message_count_ = 0;
+  }
+
+  bool has_message() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_message_.has_value();
+  }
+
+  /// Return a copy of the last message (if any).
+  std::optional<MsgT> last_message() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_message_;
+  }
+
+  size_t message_count() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return message_count_;
+  }
+
+  /// Wait for a new message that optionally satisfies a predicate.
+  bool wait_for_message(
+    TestExecutor &executor,
+    std::chrono::nanoseconds timeout,
+    const std::function<bool(const MsgT &)> &predicate = nullptr)
+  {
+    size_t start_count = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      start_count = message_count_;
+    }
+
+    return executor.spin_until(
+      [this, start_count, &predicate]() {
+        std::optional<MsgT> msg;
+        size_t count = 0;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          count = message_count_;
+          if (count <= start_count || !last_message_) {
+            return false;
+          }
+          msg = last_message_;
+        }
+        if (predicate) {
+          return predicate(*msg);
+        }
+        return true;
+      },
+      timeout);
+  }
+
+  /// Wait until at least min_publishers are connected.
+  bool wait_for_publishers(
+    TestExecutor &executor,
+    size_t min_publishers,
+    std::chrono::nanoseconds timeout)
+  {
+    return executor.spin_until(
+      [this, min_publishers]() {
+        return sub_ && sub_->get_publisher_count() >= min_publishers;
+      },
+      timeout);
+  }
+
+  bool is_connected() const { return sub_ && sub_->get_publisher_count() > 0; }
+
+private:
+  void on_message(const std::shared_ptr<MsgT> msg)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_message_ = *msg;
+    ++message_count_;
+  }
+
+  std::shared_ptr<rclcpp::Subscription<MsgT>> sub_;
+  mutable std::mutex mutex_;
+  std::optional<MsgT> last_message_;
+  size_t message_count_{0};
+};
+
+/// Wait until the topic has at least min_publishers publishers.
+inline bool wait_for_publishers(
+  TestExecutor &executor,
+  const rclcpp::Node::SharedPtr &node,
+  const std::string &topic,
+  size_t min_publishers,
+  std::chrono::nanoseconds timeout)
+{
+  return executor.spin_until(
+    [&node, &topic, min_publishers]() { return node->count_publishers(topic) >= min_publishers; },
+    timeout);
+}
+
+/// Wait until the topic has at least min_subscribers subscribers.
+inline bool wait_for_subscribers(
+  TestExecutor &executor,
+  const rclcpp::Node::SharedPtr &node,
+  const std::string &topic,
+  size_t min_subscribers,
+  std::chrono::nanoseconds timeout)
+{
+  return executor.spin_until(
+    [&node, &topic, min_subscribers]() { return node->count_subscribers(topic) >= min_subscribers; },
+    timeout);
+}
+
+/// Wait for a service to appear on the ROS graph.
+template <typename ServiceT>
+bool wait_for_service(
+  const typename rclcpp::Client<ServiceT>::SharedPtr &client,
+  TestExecutor &executor,
+  std::chrono::nanoseconds timeout)
+{
+  return executor.spin_until(
+    [&client]() { return client->wait_for_service(std::chrono::nanoseconds(0)); },
+    timeout);
+}
+
+/// Wait for an action server to appear on the ROS graph.
+template <typename ActionT>
+bool wait_for_action_server(
+  const typename rclcpp_action::Client<ActionT>::SharedPtr &client,
+  TestExecutor &executor,
+  std::chrono::nanoseconds timeout)
+{
+  return executor.spin_until(
+    [&client]() { return client->wait_for_action_server(std::chrono::nanoseconds(0)); },
+    timeout);
+}
+
+struct ServiceCallOptions
+{
+  std::chrono::nanoseconds service_timeout{kDefaultTimeout};
+  std::chrono::nanoseconds response_timeout{kDefaultTimeout};
+};
+
+/// Call a service and wait for the response.
+template <typename ServiceT>
+typename ServiceT::Response::SharedPtr call_service(
+  const typename rclcpp::Client<ServiceT>::SharedPtr &client,
+  const typename ServiceT::Request::SharedPtr &request,
+  TestExecutor &executor,
+  const ServiceCallOptions &options = ServiceCallOptions())
+{
+  if (!wait_for_service<ServiceT>(client, executor, options.service_timeout)) {
+    return nullptr;
+  }
+  auto future = client->async_send_request(request);
+  if (!executor.spin_until_future_complete(future, options.response_timeout)) {
+    return nullptr;
+  }
+  return future.get();
+}
+
+struct ActionCallOptions
+{
+  std::chrono::nanoseconds server_timeout{kDefaultTimeout};
+  std::chrono::nanoseconds goal_timeout{kDefaultTimeout};
+  std::chrono::nanoseconds result_timeout{std::chrono::seconds(30)};
+};
+
+/// Send an action goal and wait for the result.
+template <typename ActionT>
+std::optional<typename rclcpp_action::ClientGoalHandle<ActionT>::WrappedResult> call_action(
+  const typename rclcpp_action::Client<ActionT>::SharedPtr &client,
+  const typename ActionT::Goal &goal,
+  TestExecutor &executor,
+  const ActionCallOptions &options = ActionCallOptions())
+{
+  if (!wait_for_action_server<ActionT>(client, executor, options.server_timeout)) {
+    return std::nullopt;
+  }
+
+  auto goal_future = client->async_send_goal(goal);
+  if (!executor.spin_until_future_complete(goal_future, options.goal_timeout)) {
+    return std::nullopt;
+  }
+  auto goal_handle = goal_future.get();
+  if (!goal_handle) {
+    return std::nullopt;
+  }
+
+  auto result_future = client->async_get_result(goal_handle);
+  if (!executor.spin_until_future_complete(result_future, options.result_timeout)) {
+    return std::nullopt;
+  }
+  return result_future.get();
+}
 
 
 // =============================================================================

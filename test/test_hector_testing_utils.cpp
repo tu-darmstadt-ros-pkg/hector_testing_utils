@@ -15,93 +15,65 @@
 #include <hector_testing_utils/hector_testing_utils.hpp>
 
 using namespace std::chrono_literals;
+using hector_testing_utils::HectorTestFixture;
 
-namespace
+TEST_F(HectorTestFixture, FactoryPublisherSubscriptionWithQoS)
 {
+  const std::string topic = "/qos_test_topic";
 
-class RclcppFixture : public ::testing::Test
-{
-protected:
-  static void SetUpTestSuite()
-  {
-    if (!rclcpp::ok()) {
-      rclcpp::init(0, nullptr);
-    }
-  }
+  // Custom QoS to ensure factory methods forward QoS settings.
+  auto qos = rclcpp::QoS(rclcpp::KeepLast(1));
+  qos.reliable();
 
-  static void TearDownTestSuite()
-  {
-    if (rclcpp::ok()) {
-      rclcpp::shutdown();
-    }
-  }
-};
+  auto sub = tester_node_->create_test_subscription<std_msgs::msg::Int32>(topic, qos);
+  auto pub = tester_node_->create_test_publisher<std_msgs::msg::Int32>(topic, qos);
 
-}  // namespace
-
-TEST_F(RclcppFixture, CachedSubscriberReceivesMessage)
-{
-  auto node = std::make_shared<rclcpp::Node>("cached_subscriber_test");
-  hector_testing_utils::TestExecutor executor;
-  executor.add_node(node);
-
-  const std::string topic = "/cached_subscriber_test";
-  auto pub = node->create_publisher<std_msgs::msg::Int32>(topic, 10);
-  hector_testing_utils::CachedSubscriber<std_msgs::msg::Int32> sub(node, topic);
-
-  ASSERT_TRUE(sub.wait_for_publishers(executor, 1, 10s));
+  ASSERT_TRUE(tester_node_->wait_for_all_connections(*executor_, 5s));
 
   std_msgs::msg::Int32 msg;
-  msg.data = 42;
+  msg.data = 7;
   pub->publish(msg);
 
-  ASSERT_TRUE(sub.wait_for_message(executor, 10s));
-  auto last = sub.last_message();
+  ASSERT_TRUE(sub->wait_for_new_message(*executor_, 5s));
+  auto last = sub->last_message();
   ASSERT_TRUE(last.has_value());
-  EXPECT_EQ(last->data, 42);
+  EXPECT_EQ(last->data, 7);
 }
 
-TEST_F(RclcppFixture, CallServiceReturnsResponse)
+TEST_F(HectorTestFixture, ServiceClientServerWaitsForConnections)
 {
-  auto server_node = std::make_shared<rclcpp::Node>("add_two_ints_server");
-  auto client_node = std::make_shared<rclcpp::Node>("add_two_ints_client");
-
-  hector_testing_utils::TestExecutor executor;
-  executor.add_node(server_node);
-  executor.add_node(client_node);
-
+  using Service = example_interfaces::srv::AddTwoInts;
   const std::string service_name = "/add_two_ints";
-  auto service = server_node->create_service<example_interfaces::srv::AddTwoInts>(
+
+  auto server = tester_node_->create_test_service_server<Service>(
     service_name,
-    [](const std::shared_ptr<example_interfaces::srv::AddTwoInts::Request> request,
-       std::shared_ptr<example_interfaces::srv::AddTwoInts::Response> response) {
+    [](const std::shared_ptr<Service::Request> request,
+       std::shared_ptr<Service::Response> response) {
       response->sum = request->a + request->b;
     });
-  (void)service;
 
-  auto client = client_node->create_client<example_interfaces::srv::AddTwoInts>(service_name);
-  auto request = std::make_shared<example_interfaces::srv::AddTwoInts::Request>();
-  request->a = 3;
-  request->b = 4;
+  auto client = tester_node_->create_test_client<Service>(service_name);
 
-  auto response = hector_testing_utils::call_service<example_interfaces::srv::AddTwoInts>(
-    client, request, executor);
+  ASSERT_TRUE(server->wait_for_client(*executor_, 5s));
+  ASSERT_TRUE(client->wait_for_service(*executor_, 5s));
+  ASSERT_TRUE(tester_node_->wait_for_all_connections(*executor_, 5s));
+  ASSERT_SERVICE_EXISTS(tester_node_, service_name, 2s);
+
+  auto request = std::make_shared<Service::Request>();
+  request->a = 5;
+  request->b = 7;
+
+  auto future = client->get()->async_send_request(request);
+  ASSERT_TRUE(executor_->spin_until_future_complete(future, 5s));
+  auto response = future.get();
   ASSERT_NE(response, nullptr);
-  EXPECT_EQ(response->sum, 7);
+  EXPECT_EQ(response->sum, 12);
 }
 
-TEST_F(RclcppFixture, CallActionReturnsResult)
+TEST_F(HectorTestFixture, ActionClientServerWaitsForConnections)
 {
   using Fibonacci = example_interfaces::action::Fibonacci;
-  using GoalHandleFibonacci = rclcpp_action::ServerGoalHandle<Fibonacci>;
-
-  auto server_node = std::make_shared<rclcpp::Node>("fibonacci_server");
-  auto client_node = std::make_shared<rclcpp::Node>("fibonacci_client");
-
-  hector_testing_utils::TestExecutor executor;
-  executor.add_node(server_node);
-  executor.add_node(client_node);
-
+  using GoalHandle = rclcpp_action::ServerGoalHandle<Fibonacci>;
   const std::string action_name = "/fibonacci";
 
   auto handle_goal =
@@ -110,12 +82,12 @@ TEST_F(RclcppFixture, CallActionReturnsResult)
       return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
     };
 
-  auto handle_cancel = [](const std::shared_ptr<GoalHandleFibonacci> goal_handle) {
+  auto handle_cancel = [](const std::shared_ptr<GoalHandle> goal_handle) {
       (void)goal_handle;
       return rclcpp_action::CancelResponse::ACCEPT;
     };
 
-  auto handle_accepted = [](const std::shared_ptr<GoalHandleFibonacci> goal_handle) {
+  auto handle_accepted = [](const std::shared_ptr<GoalHandle> goal_handle) {
       std::thread([goal_handle]() {
         auto result = std::make_shared<Fibonacci::Result>();
         const int order = goal_handle->get_goal()->order;
@@ -134,30 +106,55 @@ TEST_F(RclcppFixture, CallActionReturnsResult)
       }).detach();
     };
 
-  auto server = rclcpp_action::create_server<Fibonacci>(
-    server_node,
-    action_name,
-    handle_goal,
-    handle_cancel,
-    handle_accepted);
-  (void)server;
+  auto server = tester_node_->create_test_action_server<Fibonacci>(
+    action_name, handle_goal, handle_cancel, handle_accepted);
+  auto client = tester_node_->create_test_action_client<Fibonacci>(action_name);
 
-  auto client = rclcpp_action::create_client<Fibonacci>(client_node, action_name);
+  ASSERT_TRUE(server->wait_for_client(*executor_, 5s));
+  ASSERT_TRUE(client->wait_for_server(*executor_, 5s));
+  ASSERT_TRUE(tester_node_->wait_for_all_connections(*executor_, 5s));
+  ASSERT_ACTION_EXISTS(tester_node_, action_name, 2s);
 
   Fibonacci::Goal goal;
   goal.order = 5;
 
-  auto wrapped = hector_testing_utils::call_action<example_interfaces::action::Fibonacci>(
-    client, goal, executor);
-  ASSERT_TRUE(wrapped.has_value());
-  EXPECT_EQ(wrapped->code, rclcpp_action::ResultCode::SUCCEEDED);
-  ASSERT_NE(wrapped->result, nullptr);
-  EXPECT_EQ(wrapped->result->sequence.size(), 5u);
-  EXPECT_EQ(wrapped->result->sequence[0], 0);
-  EXPECT_EQ(wrapped->result->sequence[1], 1);
+  auto goal_future = client->get()->async_send_goal(goal);
+  ASSERT_TRUE(executor_->spin_until_future_complete(goal_future, 5s));
+  auto goal_handle = goal_future.get();
+  ASSERT_NE(goal_handle, nullptr);
+
+  auto result_future = client->get()->async_get_result(goal_handle);
+  ASSERT_TRUE(executor_->spin_until_future_complete(result_future, 10s));
+  auto wrapped = result_future.get();
+
+  ASSERT_EQ(wrapped.code, rclcpp_action::ResultCode::SUCCEEDED);
+  ASSERT_NE(wrapped.result, nullptr);
+  EXPECT_EQ(wrapped.result->sequence.size(), 5u);
+  EXPECT_EQ(wrapped.result->sequence.back(), 3);
 }
 
-TEST_F(RclcppFixture, NodeOptionsFromYamlLoadsParameters)
+TEST_F(HectorTestFixture, CachedSubscriberReceivesMessage)
+{
+  auto subscriber_node = std::make_shared<rclcpp::Node>("cached_subscriber_test_node");
+  executor_->add_node(subscriber_node);
+
+  const std::string topic = "/cached_subscriber_test";
+  auto pub = tester_node_->create_publisher<std_msgs::msg::Int32>(topic, rclcpp::QoS(5).best_effort());
+  hector_testing_utils::CachedSubscriber<std_msgs::msg::Int32> sub(subscriber_node, topic, rclcpp::QoS(5));
+
+  ASSERT_TRUE(sub.wait_for_publishers(*executor_, 1, 5s));
+
+  std_msgs::msg::Int32 msg;
+  msg.data = 42;
+  pub->publish(msg);
+
+  ASSERT_TRUE(sub.wait_for_message(*executor_, 5s));
+  auto last = sub.last_message();
+  ASSERT_TRUE(last.has_value());
+  EXPECT_EQ(last->data, 42);
+}
+
+TEST_F(HectorTestFixture, NodeOptionsFromYamlLoadsParameters)
 {
   const std::string params_file = std::string(TEST_DATA_DIR) + "/test_params.yaml";
   auto options = hector_testing_utils::node_options_from_yaml(params_file);
