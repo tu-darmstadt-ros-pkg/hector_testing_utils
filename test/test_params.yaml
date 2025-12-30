@@ -1,0 +1,5 @@
+param_node:
+  ros__parameters:
+    foo: 42
+    bar: "baz"
+    use_sim_time: true
