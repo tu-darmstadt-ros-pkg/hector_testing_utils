@@ -4,7 +4,6 @@
 ![Lint](https://github.com/Joschi3/hector_testing_utils/actions/workflows/lint_build_test.yaml/badge.svg)
 [![codecov](https://codecov.io/gh/Joschi3/hector_testing_utils/graph/badge.svg?token=RYR8J8FNC8)](https://codecov.io/gh/Joschi3/hector_testing_utils)
 
-# hector_testing_utils
 
 Helper classes and functions for writing Google Tests that use the normal ROS 2 graph.
 
