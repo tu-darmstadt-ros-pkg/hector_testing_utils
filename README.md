@@ -52,25 +52,26 @@ Helper classes and functions for writing Google Tests that use the normal ROS 2 
 ### Utility Functions
 
 * `node_options_from_yaml`: Load parameters from a YAML file into NodeOptions
+* **LogCapture**: Helper to verify ROS log messages (singleton)
 
 
 ## Comparison with [rtest](https://github.com/Beam-and-Spyrosoft/rtest)
 
-This package and **rtest** serve different purposes. Use the table below to decide which one fits your current testing needs.
+While **rtest** is an excellent tool for unit testing, it is limited by its design: it mocks `rclcpp` entirely. This makes it fast but unusable for code that relies on real middleware behavior or external libraries that manage their own ROS entities.
 
-| Feature | **rtest** | **hector_testing_utils** |
+**hector_testing_utils** is designed to fill that gap. It provides a stable environment for the "general cases" where mocking isn't an option, aiming to make real integration tests as robust as possible.
+
+| Feature | rtest | hector_testing_utils |
 | --- | --- | --- |
-| **Test Type** | Unit Testing (Mocked) | Integration Testing (Real Graph) |
-| **Speed** | ⚡ **Instant** (No middleware overhead) | 🐢 **Slower** (Uses real DDS/RMW) |
-| **Determinism** | ✅ **100% Deterministic** (No race conditions) | ⚠️ **Variable** (Dependent on timing/OS) |
-| **Scope** | Internal Node Logic | Node-to-Node Communication |
-| **Middleware** | Bypassed (Mocks `rclcpp`) | Real (Uses actual `rclcpp` & DDS) |
-| **Best For** | CI pipelines, logic verification, fast feedback [if possible]|  Code using libraries that spawn internal entities, node-to-node interaction |
+| **Middleware** | **Mocked** (No DDS) | **Real** (Actual DDS/RMW) |
+| **Execution Speed** | ⚡ Instant | 🐢 Slower |
+| **Scope** | Unit Logic Only | Full Integration |
+| **Limitations** | Cannot test complex library interactions | Subject to OS scheduling/timing |
 
-### 💡 Recommendation
+**Summary:**
 
-* Prefer [rtest**](https://github.com/Beam-and-Spyrosoft/rtest) for the majority of your tests. It is significantly faster and more robust in CI environments because it mocks the ROS 2 communication layer, eliminating flaky tests caused by timing issues.
-* Use `hector_testing_utils**` only when you **must** spin real nodes (e.g., verifying that a launch file wires topics correctly, testing libraries that auto-create publishers/services, or validating complex node-to-node interactions). These tests are inherently slower and more brittle, so keep them focused and timeboxed.
+* **Use `rtest**` whenever possible for instant, flake-free feedback on logic.
+* **Use `hector_testing_utils**` when `rtest` is too restrictive (e.g., testing launch files, complex node interactions, or opaque libraries).
 
 
 ## Basic Example
@@ -350,6 +351,23 @@ TEST_F(HectorTestFixture, ConnectionDiagnostics)
     RCLCPP_ERROR(tester_node_->get_logger(), "Failed to connect: %s", diagnostic_report.c_str());
   }
   ASSERT_TRUE(connected);
+}
+```
+
+## Log Verification
+
+You can verify that specific log messages (warnings, errors, etc.) were published using `LogCapture`. It intercepts ROS 2 logs via `rcutils`.
+
+```cpp
+TEST_F(HectorTestFixture, LogCheck)
+{
+  LogCapture capture; // Automatically registers log handler
+
+  // Trigger something that logs
+  RCLCPP_WARN(tester_node_->get_logger(), "Something happened!");
+
+  // Assert log exists (regex support)
+  ASSERT_TRUE(capture.wait_for_log(*executor_, "Something happened.*", 2s));
 }
 ```
 
