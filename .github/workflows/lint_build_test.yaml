@@ -80,12 +80,12 @@ jobs:
 
     - name: Generate Coverage Report
       run: |
-        # 1. Capture data, tolerating gcc 13 line mismatches and unexecuted block noise
+        # 1. Capture data, tolerating gcc 13+ line mismatches/inconsistencies and unexecuted block noise
         lcov \
           --capture \
           --directory build \
           --output-file coverage.info \
-          --ignore-errors mismatch,gcov \
+          --ignore-errors mismatch,gcov,inconsistent \
           --rc geninfo_unexecuted_blocks=1
 
         # 2. Remove system files, test files, install space and gtest objects; ignore unused excludes
