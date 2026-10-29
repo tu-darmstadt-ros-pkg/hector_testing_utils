@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.16)
 project(hector_testing_utils)
 
 option(ENABLE_COVERAGE_TESTING "Enable coverage reporting" OFF)
@@ -34,8 +34,9 @@ target_include_directories(
   INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>)
 
-ament_target_dependencies(hector_testing_utils INTERFACE rclcpp rclcpp_action
-                          rcl_interfaces)
+target_link_libraries(
+  hector_testing_utils INTERFACE rclcpp::rclcpp rclcpp_action::rclcpp_action
+                                 ${rcl_interfaces_TARGETS})
 
 install(TARGETS hector_testing_utils EXPORT export_${PROJECT_NAME})
 
@@ -52,63 +53,68 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_hector_testing_utils test/test_hector_testing_utils.cpp)
   target_link_libraries(test_hector_testing_utils hector_testing_utils)
-  ament_target_dependencies(test_hector_testing_utils rclcpp rclcpp_action
-                            example_interfaces std_msgs)
+  target_link_libraries(
+    test_hector_testing_utils rclcpp::rclcpp rclcpp_action::rclcpp_action
+    ${example_interfaces_TARGETS} ${std_msgs_TARGETS})
   target_compile_definitions(
     test_hector_testing_utils
     PRIVATE TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
 
   ament_add_gtest(test_integration test/test_integration.cpp)
   target_link_libraries(test_integration hector_testing_utils)
-  ament_target_dependencies(test_integration rclcpp rclcpp_action
-                            example_interfaces std_msgs)
+  target_link_libraries(
+    test_integration rclcpp::rclcpp rclcpp_action::rclcpp_action
+    ${example_interfaces_TARGETS} ${std_msgs_TARGETS})
   target_compile_definitions(
     test_integration PRIVATE TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
 
   ament_add_gtest(test_timing test/test_timing.cpp)
   target_link_libraries(test_timing hector_testing_utils)
-  ament_target_dependencies(test_timing rclcpp std_msgs)
+  target_link_libraries(test_timing rclcpp::rclcpp ${std_msgs_TARGETS})
 
   ament_add_gtest(test_context test/test_context.cpp)
   target_link_libraries(test_context hector_testing_utils)
-  ament_target_dependencies(test_context rclcpp example_interfaces std_msgs)
+  target_link_libraries(test_context rclcpp::rclcpp
+                        ${example_interfaces_TARGETS} ${std_msgs_TARGETS})
   target_compile_definitions(
     test_context PRIVATE TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
 
   ament_add_gtest(test_log_capture test/test_log_capture.cpp)
   target_link_libraries(test_log_capture hector_testing_utils)
-  ament_target_dependencies(test_log_capture rclcpp std_msgs)
+  target_link_libraries(test_log_capture rclcpp::rclcpp ${std_msgs_TARGETS})
 
   ament_add_gtest(test_background_executor test/test_background_executor.cpp)
   target_link_libraries(test_background_executor hector_testing_utils)
-  ament_target_dependencies(test_background_executor rclcpp std_msgs
-                            example_interfaces)
+  target_link_libraries(test_background_executor rclcpp::rclcpp
+                        ${std_msgs_TARGETS} ${example_interfaces_TARGETS})
   target_compile_definitions(
     test_background_executor
     PRIVATE TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
 
   ament_add_gtest(test_executor_types test/test_executor_types.cpp)
   target_link_libraries(test_executor_types hector_testing_utils)
-  ament_target_dependencies(test_executor_types rclcpp)
+  target_link_libraries(test_executor_types rclcpp::rclcpp)
 
   ament_add_gtest(test_graph_suggestions test/test_graph_suggestions.cpp)
   target_link_libraries(test_graph_suggestions hector_testing_utils)
-  ament_target_dependencies(test_graph_suggestions rclcpp rclcpp_action
-                            example_interfaces std_msgs)
+  target_link_libraries(
+    test_graph_suggestions rclcpp::rclcpp rclcpp_action::rclcpp_action
+    ${example_interfaces_TARGETS} ${std_msgs_TARGETS})
 
   ament_add_gtest(test_qos_helpers test/test_qos_helpers.cpp)
   target_link_libraries(test_qos_helpers hector_testing_utils)
-  ament_target_dependencies(test_qos_helpers rclcpp std_msgs)
+  target_link_libraries(test_qos_helpers rclcpp::rclcpp ${std_msgs_TARGETS})
 
   ament_add_gtest(test_graph_monitor test/test_graph_monitor.cpp)
   target_link_libraries(test_graph_monitor hector_testing_utils)
-  ament_target_dependencies(test_graph_monitor rclcpp rclcpp_action
-                            example_interfaces std_msgs)
+  target_link_libraries(
+    test_graph_monitor rclcpp::rclcpp rclcpp_action::rclcpp_action
+    ${example_interfaces_TARGETS} ${std_msgs_TARGETS})
 
   ament_add_gtest(test_parameter_helpers test/test_parameter_helpers.cpp)
   target_link_libraries(test_parameter_helpers hector_testing_utils)
-  ament_target_dependencies(test_parameter_helpers rclcpp rcl_interfaces
-                            std_msgs)
+  target_link_libraries(test_parameter_helpers rclcpp::rclcpp
+                        ${rcl_interfaces_TARGETS} ${std_msgs_TARGETS})
 
 endif()
 

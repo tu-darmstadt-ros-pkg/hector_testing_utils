@@ -41,6 +41,8 @@ jobs:
           os: ubuntu-24.04
         - rosdistro: kilted
           os: ubuntu-24.04
+        - rosdistro: lyrical
+          os: ubuntu-latest
         - rosdistro: rolling
           os: ubuntu-latest
     runs-on: ${{ matrix.setup.os }}
