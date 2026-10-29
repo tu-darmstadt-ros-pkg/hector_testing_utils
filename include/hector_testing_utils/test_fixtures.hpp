@@ -44,9 +44,8 @@ protected:
   void TearDown() override
   {
     // Clean up nodes and executor before shutdown to avoid
-    // "Finalizing a context with active nodes" errors
-    tester_node_.reset();
     executor_.reset();
+    tester_node_.reset();
 
     if ( rclcpp::ok() ) {
       rclcpp::shutdown();
@@ -81,8 +80,9 @@ protected:
 
   void TearDown() override
   {
-    tester_node_.reset();
+    // Executor first to stop any background spinner before the node is destroyed.
     executor_.reset();
+    tester_node_.reset();
     context_.reset();
   }
 

@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
@@ -44,6 +45,18 @@ public:
 
 namespace detail
 {
+
+/// @brief Lock a wrapper's node. Wrappers hold it weakly since the TestNode owns them.
+inline rclcpp::Node::SharedPtr lock_node( const std::weak_ptr<rclcpp::Node> &node,
+                                          const std::string &name )
+{
+  auto locked = node.lock();
+  if ( !locked ) {
+    throw std::runtime_error( "hector_testing_utils: test wrapper for '" + name +
+                              "' used after its node was destroyed" );
+  }
+  return locked;
+}
 
 /// @brief Enrich topic suggestions with QoS information.
 ///
@@ -106,7 +119,8 @@ public:
     WaitFailureInfo failure_info;
     const bool success = wait_for_subscription( exec, timeout, failure_info );
     if ( !success ) {
-      RCLCPP_ERROR( node_->get_logger(), "%s", failure_info.format( kDefaultMaxSuggestions ).c_str() );
+      RCLCPP_ERROR( detail::lock_node( node_, get_name() )->get_logger(), "%s",
+                    failure_info.format( kDefaultMaxSuggestions ).c_str() );
     }
     return success;
   }
@@ -129,15 +143,16 @@ public:
       failure_info.searched_name = topic_;
       failure_info.searched_type = detail::get_type_name<MsgT>();
       failure_info.entity_kind = "topic";
-      failure_info.suggestions = suggest_similar_topics( node_, topic_, failure_info.searched_type );
-      detail::enrich_topic_suggestions_with_qos( node_, failure_info.suggestions, qos_, true );
+      const auto node = detail::lock_node( node_, get_name() );
+      failure_info.suggestions = suggest_similar_topics( node, topic_, failure_info.searched_type );
+      detail::enrich_topic_suggestions_with_qos( node, failure_info.suggestions, qos_, true );
     }
 
     return success;
   }
 
 private:
-  rclcpp::Node::SharedPtr node_;
+  std::weak_ptr<rclcpp::Node> node_;
   typename rclcpp::Publisher<MsgT>::SharedPtr pub_;
   std::string topic_;
   rclcpp::QoS qos_;
@@ -162,11 +177,12 @@ public:
 
     qos_ = resolved_qos;
 
+    // Capture state_, not this, as the callback may outlive the wrapper.
     sub_ = node->create_subscription<MsgT>( topic, resolved_qos,
-                                            [this]( const std::shared_ptr<MsgT> msg ) {
-                                              std::lock_guard<std::mutex> lock( mutex_ );
-                                              last_message_ = *msg;
-                                              ++message_count_;
+                                            [state = state_]( const std::shared_ptr<MsgT> msg ) {
+                                              std::lock_guard<std::mutex> lock( state->mutex );
+                                              state->last_message = *msg;
+                                              ++state->message_count;
                                             } );
   }
 
@@ -177,30 +193,30 @@ public:
   /// @brief Clear captured messages and reset count.
   void reset()
   {
-    std::lock_guard<std::mutex> lock( mutex_ );
-    last_message_.reset();
-    message_count_ = 0;
+    std::lock_guard<std::mutex> lock( state_->mutex );
+    state_->last_message.reset();
+    state_->message_count = 0;
   }
 
   /// @brief Check if new messages arrived since a starting count.
   bool has_new_message( size_t start_count ) const
   {
-    std::lock_guard<std::mutex> lock( mutex_ );
-    return message_count_ > start_count;
+    std::lock_guard<std::mutex> lock( state_->mutex );
+    return state_->message_count > start_count;
   }
 
   /// @brief Get the last received message.
   std::optional<MsgT> last_message() const
   {
-    std::lock_guard<std::mutex> lock( mutex_ );
-    return last_message_;
+    std::lock_guard<std::mutex> lock( state_->mutex );
+    return state_->last_message;
   }
 
   /// @brief Get the total number of received messages.
   size_t message_count() const
   {
-    std::lock_guard<std::mutex> lock( mutex_ );
-    return message_count_;
+    std::lock_guard<std::mutex> lock( state_->mutex );
+    return state_->message_count;
   }
 
   /// @brief Wait until at least 'count' publishers are connected.
@@ -217,7 +233,8 @@ public:
     WaitFailureInfo failure_info;
     const bool success = wait_for_publishers( executor, count, timeout, failure_info );
     if ( !success ) {
-      RCLCPP_ERROR( node_->get_logger(), "%s", failure_info.format( kDefaultMaxSuggestions ).c_str() );
+      RCLCPP_ERROR( detail::lock_node( node_, get_name() )->get_logger(), "%s",
+                    failure_info.format( kDefaultMaxSuggestions ).c_str() );
     }
     return success;
   }
@@ -242,8 +259,9 @@ public:
       failure_info.searched_name = topic_;
       failure_info.searched_type = detail::get_type_name<MsgT>();
       failure_info.entity_kind = "topic";
-      failure_info.suggestions = suggest_similar_topics( node_, topic_, failure_info.searched_type );
-      detail::enrich_topic_suggestions_with_qos( node_, failure_info.suggestions, qos_, false );
+      const auto node = detail::lock_node( node_, get_name() );
+      failure_info.suggestions = suggest_similar_topics( node, topic_, failure_info.searched_type );
+      detail::enrich_topic_suggestions_with_qos( node, failure_info.suggestions, qos_, false );
     }
 
     return success;
@@ -259,8 +277,8 @@ public:
   {
     size_t start_count = 0;
     {
-      std::lock_guard<std::mutex> lock( mutex_ );
-      start_count = message_count_;
+      std::lock_guard<std::mutex> lock( state_->mutex );
+      start_count = state_->message_count;
     }
 
     return executor.spin_until(
@@ -268,12 +286,12 @@ public:
           std::optional<MsgT> msg;
           size_t count = 0;
           {
-            std::lock_guard<std::mutex> lock( mutex_ );
-            count = message_count_;
-            if ( count <= start_count || !last_message_ ) {
+            std::lock_guard<std::mutex> lock( state_->mutex );
+            count = state_->message_count;
+            if ( count <= start_count || !state_->last_message ) {
               return false;
             }
-            msg = last_message_;
+            msg = state_->last_message;
           }
           if ( predicate ) {
             return predicate( *msg );
@@ -291,13 +309,17 @@ public:
   }
 
 private:
-  rclcpp::Node::SharedPtr node_;
+  std::weak_ptr<rclcpp::Node> node_;
   std::shared_ptr<rclcpp::Subscription<MsgT>> sub_;
   std::string topic_;
   rclcpp::QoS qos_{ rclcpp::KeepLast( 10 ) };
-  mutable std::mutex mutex_;
-  std::optional<MsgT> last_message_;
-  size_t message_count_{ 0 };
+
+  struct State {
+    std::mutex mutex;
+    std::optional<MsgT> last_message;
+    size_t message_count{ 0 };
+  };
+  std::shared_ptr<State> state_ = std::make_shared<State>();
 };
 
 /// @brief Wrapper for a ROS service client to facilitate testing.
@@ -331,7 +353,8 @@ public:
     WaitFailureInfo failure_info;
     const bool success = wait_for_service( exec, timeout, failure_info );
     if ( !success ) {
-      RCLCPP_ERROR( node_->get_logger(), "%s", failure_info.format( kDefaultMaxSuggestions ).c_str() );
+      RCLCPP_ERROR( detail::lock_node( node_, get_name() )->get_logger(), "%s",
+                    failure_info.format( kDefaultMaxSuggestions ).c_str() );
     }
     return success;
   }
@@ -354,15 +377,15 @@ public:
       failure_info.searched_name = service_name_;
       failure_info.searched_type = detail::get_type_name<ServiceT>();
       failure_info.entity_kind = "service";
-      failure_info.suggestions =
-          suggest_similar_services( node_, service_name_, failure_info.searched_type );
+      failure_info.suggestions = suggest_similar_services(
+          detail::lock_node( node_, get_name() ), service_name_, failure_info.searched_type );
     }
 
     return success;
   }
 
 private:
-  rclcpp::Node::SharedPtr node_;
+  std::weak_ptr<rclcpp::Node> node_;
   typename rclcpp::Client<ServiceT>::SharedPtr client_;
   std::string service_name_;
 };
@@ -398,7 +421,8 @@ public:
     WaitFailureInfo failure_info;
     const bool success = wait_for_server( exec, timeout, failure_info );
     if ( !success ) {
-      RCLCPP_ERROR( node_->get_logger(), "%s", failure_info.format( kDefaultMaxSuggestions ).c_str() );
+      RCLCPP_ERROR( detail::lock_node( node_, get_name() )->get_logger(), "%s",
+                    failure_info.format( kDefaultMaxSuggestions ).c_str() );
     }
     return success;
   }
@@ -422,15 +446,15 @@ public:
       failure_info.searched_name = action_name_;
       failure_info.searched_type = detail::get_type_name<ActionT>();
       failure_info.entity_kind = "action";
-      failure_info.suggestions =
-          suggest_similar_actions( node_, action_name_, failure_info.searched_type );
+      failure_info.suggestions = suggest_similar_actions( detail::lock_node( node_, get_name() ),
+                                                          action_name_, failure_info.searched_type );
     }
 
     return success;
   }
 
 private:
-  rclcpp::Node::SharedPtr node_;
+  std::weak_ptr<rclcpp::Node> node_;
   typename rclcpp_action::Client<ActionT>::SharedPtr client_;
   std::string action_name_;
 };
@@ -448,10 +472,13 @@ public:
                      const Callback &callback, const rclcpp::QoS &qos = rclcpp::ServicesQoS() )
       : node_( node ), service_name_( service_name )
   {
-    service_ = node_->create_service<ServiceT>( service_name_, callback, qos );
+    service_ = node->create_service<ServiceT>( service_name_, callback, qos );
   }
 
-  bool is_connected() const override { return node_->count_clients( service_name_ ) > 0; }
+  bool is_connected() const override
+  {
+    return detail::lock_node( node_, get_name() )->count_clients( service_name_ ) > 0;
+  }
   std::string get_name() const override { return service_name_; }
   std::string get_type() const override { return "Service Server"; }
 
@@ -467,7 +494,8 @@ public:
     WaitFailureInfo failure_info;
     const bool success = wait_for_client( exec, timeout, failure_info );
     if ( !success ) {
-      RCLCPP_ERROR( node_->get_logger(), "%s", failure_info.format( kDefaultMaxSuggestions ).c_str() );
+      RCLCPP_ERROR( detail::lock_node( node_, get_name() )->get_logger(), "%s",
+                    failure_info.format( kDefaultMaxSuggestions ).c_str() );
     }
     return success;
   }
@@ -490,8 +518,8 @@ public:
       failure_info.searched_name = service_name_;
       failure_info.searched_type = detail::get_type_name<ServiceT>();
       failure_info.entity_kind = "service";
-      failure_info.suggestions =
-          suggest_similar_services( node_, service_name_, failure_info.searched_type );
+      failure_info.suggestions = suggest_similar_services(
+          detail::lock_node( node_, get_name() ), service_name_, failure_info.searched_type );
     }
 
     return success;
@@ -501,7 +529,7 @@ public:
   typename rclcpp::Service<ServiceT>::SharedPtr get() { return service_; }
 
 private:
-  rclcpp::Node::SharedPtr node_;
+  std::weak_ptr<rclcpp::Node> node_;
   typename rclcpp::Service<ServiceT>::SharedPtr service_;
   std::string service_name_;
 };
@@ -523,15 +551,14 @@ public:
                     GoalCallback goal_cb, CancelCallback cancel_cb, AcceptedCallback accepted_cb )
       : node_( node ), action_name_( action_name )
   {
-    server_ =
-        rclcpp_action::create_server<ActionT>( node_, action_name_, std::move( goal_cb ),
-                                               std::move( cancel_cb ), std::move( accepted_cb ) );
+    server_ = rclcpp_action::create_server<ActionT>(
+        node, action_name_, std::move( goal_cb ), std::move( cancel_cb ), std::move( accepted_cb ) );
   }
 
   bool is_connected() const override
   {
     // Clients subscribe to the status topic; use that to infer connectivity.
-    return node_->count_subscribers( status_topic() ) > 0;
+    return detail::lock_node( node_, get_name() )->count_subscribers( status_topic() ) > 0;
   }
 
   std::string get_name() const override { return action_name_; }
@@ -549,7 +576,8 @@ public:
     WaitFailureInfo failure_info;
     const bool success = wait_for_client( exec, timeout, failure_info );
     if ( !success ) {
-      RCLCPP_ERROR( node_->get_logger(), "%s", failure_info.format( kDefaultMaxSuggestions ).c_str() );
+      RCLCPP_ERROR( detail::lock_node( node_, get_name() )->get_logger(), "%s",
+                    failure_info.format( kDefaultMaxSuggestions ).c_str() );
     }
     return success;
   }
@@ -572,8 +600,8 @@ public:
       failure_info.searched_name = action_name_;
       failure_info.searched_type = detail::get_type_name<ActionT>();
       failure_info.entity_kind = "action";
-      failure_info.suggestions =
-          suggest_similar_actions( node_, action_name_, failure_info.searched_type );
+      failure_info.suggestions = suggest_similar_actions( detail::lock_node( node_, get_name() ),
+                                                          action_name_, failure_info.searched_type );
     }
 
     return success;
@@ -585,7 +613,7 @@ public:
 private:
   std::string status_topic() const { return action_name_ + "/_action/status"; }
 
-  rclcpp::Node::SharedPtr node_;
+  std::weak_ptr<rclcpp::Node> node_;
   typename rclcpp_action::Server<ActionT>::SharedPtr server_;
   std::string action_name_;
 };

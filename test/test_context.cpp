@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <example_interfaces/action/fibonacci.hpp>
 #include <example_interfaces/srv/add_two_ints.hpp>
 #include <std_msgs/msg/int32.hpp>
 
@@ -173,6 +174,36 @@ TEST_F( HectorTestFixtureWithContext, ContextCleanup )
 
   // TearDown will be called automatically after this test
   // and should properly shut down the context
+}
+
+// Test that wrappers registered with the node don't keep it alive
+TEST_F( HectorTestFixtureWithContext, NodeReleasedWithRegisteredWrappers )
+{
+  using Service = example_interfaces::srv::AddTwoInts;
+  using Action = example_interfaces::action::Fibonacci;
+
+  tester_node_->create_test_publisher<std_msgs::msg::Int32>( "/release_test/topic" );
+  tester_node_->create_test_subscription<std_msgs::msg::Int32>( "/release_test/topic" );
+  tester_node_->create_test_client<Service>( "/release_test/service" );
+  tester_node_->create_test_service_server<Service>(
+      "/release_test/service",
+      []( const std::shared_ptr<Service::Request>, std::shared_ptr<Service::Response> ) { } );
+  tester_node_->create_test_action_client<Action>( "/release_test/action" );
+  tester_node_->create_test_action_server<Action>(
+      "/release_test/action",
+      []( const rclcpp_action::GoalUUID &, std::shared_ptr<const Action::Goal> ) {
+        return rclcpp_action::GoalResponse::REJECT;
+      },
+      []( const std::shared_ptr<rclcpp_action::ServerGoalHandle<Action>> ) {
+        return rclcpp_action::CancelResponse::REJECT;
+      },
+      []( const std::shared_ptr<rclcpp_action::ServerGoalHandle<Action>> ) {} );
+
+  std::weak_ptr<hector_testing_utils::TestNode> weak_node = tester_node_;
+  tester_node_.reset();
+  executor_.reset();
+
+  EXPECT_TRUE( weak_node.expired() );
 }
 
 // Test multiple test fixture instances don't interfere
