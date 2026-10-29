@@ -87,18 +87,19 @@ jobs:
           --directory build \
           --output-file coverage.info \
           --exclude '/usr/*' \
-          --ignore-errors mismatch,gcov,inconsistent,inconsistent,negative \
+          --exclude '/opt/*' \
+          --ignore-errors mismatch,gcov,inconsistent,inconsistent,negative,unused \
           --rc geninfo_unexecuted_blocks=1
 
-        # 2. Remove system files, test files, install space and gtest objects; ignore unused excludes
+        # 2. Remove system files, ROS headers, test files, install space and gtest objects; ignore unused excludes
         lcov \
           --remove coverage.info \
-          '/usr/*' '*/test/*' '*/install/*' '*/gtest/*' \
+          '/usr/*' '/opt/*' '*/test/*' '*/install/*' '*/gtest/*' \
           --output-file coverage_cleaned.info \
-          --ignore-errors unused
+          --ignore-errors unused,inconsistent,inconsistent
 
         # 3. List summary for debugging logs
-        lcov --list coverage_cleaned.info
+        lcov --list coverage_cleaned.info --ignore-errors inconsistent,inconsistent
 
     - name: Upload to Codecov
       uses: codecov/codecov-action@v5
